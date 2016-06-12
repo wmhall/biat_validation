@@ -1,0 +1,242 @@
+---
+title: "iat_validation"
+author: "William Hall"
+date: "June 10, 2016"
+output:
+  html_document:
+    keep_md: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_knit$set(root.dir = normalizePath("../..")) 
+```
+
+##Overview
+
+For both the engineering sample (EES) and the grad sample (GSS) I examined the split half reliability and outlying responses. Overall the grad data looks to have less problematic responding than the engineering sample. At the end of the document I flag possible cases that we might exclude in the engineering sample. 
+
+## IAT scoring algorithm
+
+The brief IAT was scored according to the best practices described in [Nosek et al., (2014)](https://www.ncbi.nlm.nih.gov/pmc/articles/PMC4259300/):
+
+* Remove trials >10000 milliseconds
+* Remove 1st four trials of each response block
+* Retain error trials
+* Recode <400 ms to 400 ms and >2000 ms to 2000 ms
+* Compute D separately for each pair of two consecutive blocks separately, and then average
+* Remove participants with >10% fast responses
+
+Note that Nosek et al., (2014) didn't find that removing participants with a high percentage of error rates improved the sensitivity of the d-scores so they don't recommend doing that. Instead they found that removing people with a >10% responses that were less than 300ms was a better choice, and that is what I did, along with the other recommendations.
+
+
+```{r, include=FALSE}
+#read in and clean data
+library(dplyr)
+library(readr)
+library(purrr)
+library(tidyr)
+library(ggplot2)
+
+source("R/fxwins.R")
+source("R/format_table.R")
+
+file_names <- 
+  c("ees_iat_clean.csv", "gss_iat_clean.csv")
+
+#read in rts
+rt_raw <- 
+list.files(path = "data/preprocessed/", 
+           pattern = paste(file_names, collapse = "|"), 
+           full.names = T) %>% 
+  map(read_csv) %>% bind_rows( .id = "study") %>% 
+  mutate(study = ifelse(study == 1, "ees", "gss")) %>% 
+  #filter out a participant who did not complete t2
+  filter(subject !=3355)
+
+rt_clean <- 
+rt_raw %>% 
+  map_at(., "latency", ~ fxwins(.)) %>% 
+  as_data_frame()
+
+```
+
+##Split half reliability
+
+The first thing I did is, for each study, split the task in two and compute a d-score for both halves and the look at the correlation between the two halves. The split-half reliability looked good for both studies:
+
+```{r, results='asis', echo=FALSE}
+
+means <- 
+rt_clean %>% 
+  group_by(subject, blockcode, block_type) %>% 
+  summarise(mean_lat = mean(latency)) %>% 
+  spread(blockcode, mean_lat) %>% 
+  mutate(mean_diff = pair2 - pair1) %>% 
+  select(-pair1, -pair2)
+
+d_scores <- 
+  rt_clean %>% 
+  group_by(subject, block_type) %>% 
+  summarise(sd_lat = sd(latency)) %>% 
+  left_join(means, .) %>%
+  mutate(d_score = mean_diff/ sd_lat) %>%
+  select(subject, block_type, d_score) %>% 
+  spread(block_type, d_score) %>% 
+  right_join(., unique(select(rt_clean, subject, study)),
+             by = "subject")
+
+#calculate split half reliability
+
+d_scores %>% 
+  group_by(study) %>% 
+  do(broom::tidy(cor.test(.$test1, .$test2))) %>%
+  rename(r = estimate) %>% 
+  select(-statistic, -parameter) %>% 
+  mutate_each(funs(fixed_digits), 
+             r, conf.low, conf.high) %>% 
+  mutate(p.value = format_pval(p.value)) %>% 
+  knitr::kable(format = "markdown")
+
+
+```
+
+
+##Outliers
+
+###Reaction times
+
+Next, I wanted to see if there were participants whose reaction times were on average outliers. In the plot below, the black points are individual trial reaction times, and each red dot represents a participants' mean reaction time. You can see that the grad data looks pretty clean, but in the EES data one person looks potentially problematic. 
+
+```{r, results='asis', echo=FALSE}
+rt_clean %>%  
+  ggplot(., aes(x = subject, y = latency)) + 
+  geom_point() + facet_wrap(~study, scale = "free_x")  +
+  stat_summary(fun.y = mean, colour = "red", 
+               geom = "point", size = 5)
+```
+
+###Counts of winsorized reaction times
+
+Another way to look for participants with problematic reaction times is to count the number of winsorized reaction times for each participant. The plot below shows these counts (note that these plots don't include people with zero winsorized rts). You can see that the EES data has one person with a lot of reaction times that were set to 400ms or 2000ms; the grad data looks ok. 
+
+```{r, results='asis', echo=FALSE}
+outlier_rts <- 
+rt_clean %>% 
+  filter(latency == 400 | latency == 2000) %>% 
+  group_by(subject) %>% 
+  summarise(n_outliers = n()) %>%
+  left_join(., unique(select(rt_clean, subject, study)))
+
+outlier_rts %>% 
+  ggplot(., aes(x = n_outliers)) + geom_histogram() +
+  facet_wrap(~study, scale = "free_x")
+
+```
+
+###Error rates
+
+Next, I plotted the proportion of correct responses (1 = 100% correct, 0 = 0% correct). You can see that there is one person in the EES data that has a high proportion of error rates (around 50%).  
+
+```{r, results='asis', echo=FALSE}
+error_rates <- 
+rt_clean %>% 
+  group_by(study, subject) %>% 
+  summarise(perc_correct = mean(correct))
+
+error_rates %>% 
+  ggplot(., aes(x = subject, y = perc_correct)) +
+  facet_wrap(~study, scale = "free_x") + geom_point() 
+
+```
+
+##Tests for study differences
+
+Finally, I tested whether there were between study differences on the mean reaction times, number of winsorized responses, and error rates. These anlyses showed that there were significant differences for mean rts and the counts for winsorized responses; in both cases, the EES data shows evidence of more problematic responding than the grad data. 
+
+```{r, results='asis', echo=FALSE}
+#analyses and plots for study differences.
+fms <- 
+plyr::join_all(list(rt_clean, error_rates, outlier_rts)) %>% 
+  as_data_frame() %>% 
+  mutate(n_outliers = ifelse(is.na(n_outliers), 0, 
+                             n_outliers)) %>% 
+  gather(var_name, score, latency, perc_correct, n_outliers) %>%
+  nest(-var_name) %>%
+  mutate(fm = map(data, ~lm(lm(score ~ 1 + study, data = .))), 
+         fm_tidy = map(fm, ~ broom::tidy(., conf.int =T )))
+
+
+fms_with_predictions <- 
+  fms %>% 
+  mutate(pred_grid = 
+           map(data, ~ expand(.,study)), 
+         predictions = 
+           map2(fm, pred_grid, 
+                ~data.frame(predict(.x, .y, 
+                         interval = "confidence"))))
+
+fms_with_predictions %>% 
+  select(var_name, pred_grid, predictions) %>% 
+  unnest() %>% 
+  ggplot(., aes(x = study, y = fit, fill = study)) + 
+  facet_wrap(~ var_name, scales = "free_y") +
+  geom_bar(stat = "identity") + 
+  geom_errorbar(aes(ymax = upr, ymin = lwr), width = .25)
+
+fms %>% 
+  select(var_name, fm_tidy) %>% 
+  unnest() %>% 
+  filter(term != "(Intercept)") %>% 
+  select(-term) %>% 
+  mutate_each(funs(fixed_digits), estimate, std.error, 
+                   statistic, p.value, conf.low, conf.high) %>%
+  mutate(p.value = format_pval(p.value)) %>% 
+  knitr::kable(format = "markdown")
+```
+
+
+##Identifying problematic participants
+
+The following IDs might be worth exploring: 8344, 8108, and 8349. 
+8108 and 8344 seem the most egregious to me. 8344 made a lot of mistakes but did so with pretty slow reaction times -- hence why the remained in the data. 8108 didn't make too many mistakes but responded very slowly throughout the task.
+
+###Outlying reaction times
+
+Top five reaction times, sorted in descending order:
+
+```{r, results='asis', echo=FALSE}
+rt_clean %>% 
+  filter(study == "ees") %>% 
+  group_by(subject) %>% 
+  summarise(mean_latency = mean(latency)) %>% 
+  arrange(desc(mean_latency)) %>% 
+  head(5) %>% 
+  knitr::kable(format = "markdown")
+```
+
+###Outlying counts of winsorized reaction times
+
+Top five winsorized counts, sorted in descending order:
+
+```{r, results='asis', echo=FALSE}
+outlier_rts %>% 
+  filter(study == "ees") %>% 
+  arrange(desc(n_outliers)) %>% 
+  head(5) %>% 
+  knitr::kable(format = "markdown")
+```
+
+###Outlying error rates
+
+Top five error rates, sorted in ascending order:
+
+```{r, results='asis', echo=FALSE}
+error_rates %>%
+  filter(study == "ees") %>% 
+  arrange(perc_correct) %>% 
+  head(5) %>% 
+  knitr::kable(format = "markdown")
+
+```
+
