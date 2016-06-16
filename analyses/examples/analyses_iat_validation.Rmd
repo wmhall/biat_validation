@@ -2,9 +2,7 @@
 title: "iat_validation"
 author: "William Hall"
 date: "June 10, 2016"
-output:
-  html_document:
-    keep_md: true
+output: github_document
 ---
 
 ```{r setup, include=FALSE}
@@ -37,6 +35,8 @@ library(readr)
 library(purrr)
 library(tidyr)
 library(ggplot2)
+library(lme4)
+library(lsmeans)
 
 source("R/fxwins.R")
 source("R/format_table.R")
@@ -163,14 +163,14 @@ plyr::join_all(list(rt_clean, error_rates, outlier_rts)) %>%
                              n_outliers)) %>% 
   gather(var_name, score, latency, perc_correct, n_outliers) %>%
   nest(-var_name) %>%
-  mutate(fm = map(data, ~lm(lm(score ~ 1 + study, data = .))), 
+  mutate(fm = map(data, ~lm(score ~ 1 + study, data = .)), 
          fm_tidy = map(fm, ~ broom::tidy(., conf.int =T )))
 
 
 fms_with_predictions <- 
   fms %>% 
   mutate(pred_grid = 
-           map(data, ~ expand(.,study)), 
+           map(data, ~ tidyr::expand(.,study)), 
          predictions = 
            map2(fm, pred_grid, 
                 ~data.frame(predict(.x, .y, 
@@ -237,6 +237,57 @@ error_rates %>%
   arrange(perc_correct) %>% 
   head(5) %>% 
   knitr::kable(format = "markdown")
+
+```
+
+
+##Compatible vs. incompatible blocks
+
+Plot of reactime times of compatible and incompatible blocks, split by study. The red dot indicates the mean reaction time.
+
+```{r,results='asis', echo=FALSE}
+
+rt_clean_coded <- rt_clean %>% 
+  mutate(blockcode = ifelse(blockcode == "pair2", 
+                            "incompatible", "compatible"))
+
+rt_clean_coded %>% 
+  ggplot(., aes(x = blockcode, y = latency)) + 
+  geom_jitter(alpha = .5) + facet_wrap(~study, scale = "free_x")  +
+  stat_summary(fun.y = mean, colour = "red", 
+               geom = "point", size = 5)
+
+```
+
+I fit a mixed model ANOVA with blocktype varying within subjects and study varying between subjects.
+
+###Overall ANOVA
+
+```{r, results='asis', echo=FALSE}
+fm <- 
+  lmer(latency ~ 1 + study*blockcode +
+         (1|subject) + (1|blockcode:subject), 
+       data = rt_clean_coded)
+
+anova(fm) %>% mutate(term = rownames(.)) %>%
+  select(5, 2:4) %>% 
+  map_if(is.numeric, ~ round(., digits = 2)) %>% 
+  as_data_frame() %>% 
+  knitr::kable(format = "markdown")
+
+```
+
+###Pairwise contrasts
+
+Pairwise contrasts show that the grad sample generally had faster RTs than the workplace sample, but the grad sample had less stereotypical associations (i.e. the difference between participants congurent and incongruent RTs is smaller in the grad (vs. workplace) sample)
+
+```{r, echo=FALSE}
+ suppressMessages(summary(lsmeans(fm, 
+        pairwise ~ study:blockcode, 
+        adjust = "none"))$contrasts %>% 
+  map_if(is.numeric, ~ round(.,digits = 2)) %>%
+  as_data_frame() %>% 
+  select(-df) %>% knitr::kable(format = "markdown"))
 
 ```
 
